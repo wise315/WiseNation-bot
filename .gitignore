@@ -1,0 +1,95 @@
+# =========================
+# Python
+# =========================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+*.so
+
+.Python
+
+.venv/
+venv/
+env/
+ENV/
+
+pip-wheel-metadata/
+build/
+dist/
+*.egg-info/
+
+
+# =========================
+# Environment variables
+# =========================
+
+.env
+.env.*
+!.env.example
+
+
+# =========================
+# IDE
+# =========================
+
+.vscode/
+.idea/
+
+*.swp
+*.swo
+
+.DS_Store
+
+
+# =========================
+# Testing
+# =========================
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+.mypy_cache/
+.ruff_cache/
+
+
+# =========================
+# Logs
+# =========================
+
+*.log
+logs/
+
+
+# =========================
+# Local database / runtime
+# =========================
+
+*.sqlite
+*.sqlite3
+
+tmp/
+temp/
+
+
+# =========================
+# Secrets / wallets
+# =========================
+
+*.pem
+*.key
+*.secret
+
+wallets/
+secrets/
+
+
+# =========================
+# OS
+# =========================
+
+Thumbs.db
+Desktop.ini
