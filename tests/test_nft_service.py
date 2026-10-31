@@ -1,7 +1,8 @@
-from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
 
+from app.database.models.chain import Chain
 from app.database.session import AsyncSessionLocal
 from app.schemas.nft import WalletNFT
 from app.services.user_service import UserService
@@ -29,9 +30,34 @@ class FakeNFTProvider:
         ]
 
 
+async def get_ethereum_chain_id(session) -> int:
+    """
+    Return Ethereum's internal database ID.
+
+    Ethereum's blockchain network ID is 1, but its
+    database primary key may be different.
+    """
+    result = await session.execute(
+        select(Chain).where(Chain.chain_id == 1)
+    )
+
+    ethereum = result.scalar_one_or_none()
+
+    if ethereum is None:
+        raise AssertionError(
+            "Ethereum is missing from the chains table. "
+            "Create the Ethereum chain record before running "
+            "these tests."
+        )
+
+    return ethereum.id
+
+
 @pytest.mark.asyncio
 async def test_get_nfts_returns_wallet_nfts():
     async with AsyncSessionLocal() as session:
+        ethereum_chain_id = await get_ethereum_chain_id(session)
+
         user_service = UserService(session)
 
         user, _ = await user_service.get_or_create_user(
@@ -47,7 +73,7 @@ async def test_get_nfts_returns_wallet_nfts():
 
         wallet = await wallet_service.add_wallet(
             user_id=user.id,
-            chain_id=1,
+            chain_id=ethereum_chain_id,
             address=(
                 "0x0000000000000000000000000000000000000003"
             ),
@@ -75,6 +101,8 @@ async def test_get_nfts_returns_wallet_nfts():
 @pytest.mark.asyncio
 async def test_get_nfts_rejects_other_users_wallet():
     async with AsyncSessionLocal() as session:
+        ethereum_chain_id = await get_ethereum_chain_id(session)
+
         user_service = UserService(session)
 
         owner, _ = await user_service.get_or_create_user(
@@ -96,7 +124,7 @@ async def test_get_nfts_rejects_other_users_wallet():
 
         wallet = await wallet_service.add_wallet(
             user_id=owner.id,
-            chain_id=1,
+            chain_id=ethereum_chain_id,
             address=(
                 "0x0000000000000000000000000000000000000004"
             ),
@@ -115,6 +143,8 @@ async def test_get_nfts_rejects_other_users_wallet():
 @pytest.mark.asyncio
 async def test_get_nfts_requires_provider():
     async with AsyncSessionLocal() as session:
+        ethereum_chain_id = await get_ethereum_chain_id(session)
+
         user_service = UserService(session)
 
         user, _ = await user_service.get_or_create_user(
@@ -127,7 +157,7 @@ async def test_get_nfts_requires_provider():
 
         wallet = await wallet_service.add_wallet(
             user_id=user.id,
-            chain_id=1,
+            chain_id=ethereum_chain_id,
             address=(
                 "0x0000000000000000000000000000000000000005"
             ),

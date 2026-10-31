@@ -1,7 +1,9 @@
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from sqlalchemy import select
 
+from app.database.models.chain import Chain
 from app.blockchain.address import normalize_ethereum_address
 from app.blockchain.providers.factory import (
     create_transaction_history_provider,
@@ -749,10 +751,23 @@ async def receive_wallet_label(
         )
 
         wallet_service = WalletService(session)
+        
+        result = await session.execute(
+            select(Chain).where(Chain.chain_id == 1)
+        )
+        
+        ethereum_chain = result.scalar_one_or_none()
+        
+        if ethereum_chain is None:
+            await message.answer(
+                "❌ Ethereum network configuration is missing."
+                "Please contact the bot administrator."
+            )
+            return
 
         wallet = await wallet_service.add_wallet(
             user_id=user.id,
-            chain_id=1,
+            chain_id=ethereum_chain.id,
             address=address,
             label=label,
             wallet_type="watch_only",
