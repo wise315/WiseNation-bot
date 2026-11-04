@@ -1,3 +1,4 @@
+
 import pytest
 
 from app.blockchain.service import BlockchainService
@@ -9,9 +10,11 @@ async def test_ethereum_rpc_connection():
     settings = get_settings()
     blockchain = BlockchainService()
 
-    connected = await blockchain.ethereum.is_connected()
-
-    assert connected is True
+    try:
+        connected = await blockchain.ethereum.is_connected()
+        assert connected is True
+    finally:
+        await blockchain.ethereum.close()
 
 
 @pytest.mark.asyncio
@@ -19,27 +22,34 @@ async def test_ethereum_chain_id():
     settings = get_settings()
     blockchain = BlockchainService()
 
-    chain_id = await blockchain.ethereum.get_chain_id()
-
-    assert chain_id == settings.ethereum_chain_id
+    try:
+        chain_id = await blockchain.ethereum.get_chain_id()
+        assert chain_id == settings.ethereum_chain_id
+    finally:
+        await blockchain.ethereum.close()
 
 
 @pytest.mark.asyncio
 async def test_ethereum_block_number():
     blockchain = BlockchainService()
 
-    block_number = await blockchain.ethereum.get_block_number()
+    try:
+        block_number = await blockchain.ethereum.get_block_number()
+        assert isinstance(block_number, int)
+        assert block_number > 0
+    finally:
+        await blockchain.ethereum.close()
 
-    assert isinstance(block_number, int)
-    assert block_number > 0
-    
+
 @pytest.mark.asyncio
 async def test_ethereum_balance():
     blockchain = BlockchainService()
 
-    address = "0x0000000000000000000000000000000000000000"
+    try:
+        address = "0x0000000000000000000000000000000000000000"
+        balance = await blockchain.ethereum.get_balance(address)
 
-    balance = await blockchain.ethereum.get_balance(address)
-
-    assert isinstance(balance, int)
-    assert balance >= 0
+        assert isinstance(balance, int)
+        assert balance >= 0
+    finally:
+        await blockchain.ethereum.close()

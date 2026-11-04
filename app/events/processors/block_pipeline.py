@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from typing import Protocol
@@ -7,6 +6,7 @@ from app.events.engine import EventEngine
 from app.events.processors.nft_processor import NFTEventProcessor
 from app.events.schemas import BlockchainEvent, EventType
 from app.schemas.blockchain_activity import EthereumContractLog
+from app.services.block_checkpoint_service import BlockCheckpointService
 
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ class BlockEventPipeline:
         nft_processor: NFTEventProcessor,
         event_engine: EventEngine,
         chain_id: int = 1,
+        checkpoint_service: BlockCheckpointService | None = None,
     ) -> None:
         if chain_id <= 0:
             raise ValueError("chain_id must be positive.")
@@ -37,7 +38,8 @@ class BlockEventPipeline:
         self.nft_processor = nft_processor
         self.event_engine = event_engine
         self.chain_id = chain_id
-
+        self.checkpoint_service = checkpoint_service
+        
         self._inflight: dict[int, asyncio.Task[int]] = {}
         self._lock = asyncio.Lock()
         self._subscribed = False
@@ -121,10 +123,18 @@ class BlockEventPipeline:
 
         count = await self.nft_processor.process_logs(logs)
 
+        if self.checkpoint_service is not None:
+            await self.checkpoint_service.save_checkpoint(
+                chain_id=self.chain_id,
+                block_number=block_number,
+            )
+            await self.checkpoint_service.session.commit()
+
         logger.info(
             "Processed block %s: %s NFT events dispatched",
             block_number,
             count,
         )
 
-        return count
+        return count 
+    

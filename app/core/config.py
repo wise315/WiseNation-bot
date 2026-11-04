@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     ethereum_rpc_ws_backup: str = ""
 
     etherscan_api_key: str = ""
-    alchemy_api_key: str = ""
     opensea_api_key: str = ""
 
     encryption_key: str = ""

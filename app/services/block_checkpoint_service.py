@@ -1,4 +1,3 @@
-
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -94,5 +93,52 @@ class BlockCheckpointService:
         )
 
         checkpoint = result.scalar_one()
+
+        return checkpoint
+
+    async def rollback_checkpoint(
+        self,
+        chain_id: int,
+        block_number: int,
+        block_hash: str | None = None,
+    ) -> BlockCheckpoint:
+        """Move a checkpoint backward after detecting a blockchain reorg."""
+
+        if isinstance(chain_id, bool) or not isinstance(chain_id, int) or chain_id <= 0:
+            raise ValueError("chain_id must be positive.")
+
+        if (
+            isinstance(block_number, bool)
+            or not isinstance(block_number, int)
+            or block_number < 0
+        ):
+            raise ValueError("block_number must be a non-negative integer.")
+
+        if block_hash is not None:
+            if (
+                not isinstance(block_hash, str)
+                or len(block_hash) != 66
+                or not block_hash.startswith("0x")
+            ):
+                raise ValueError("Invalid block hash.")
+
+            try:
+                bytes.fromhex(block_hash[2:])
+            except ValueError as exc:
+                raise ValueError("Invalid hexadecimal block hash.") from exc
+
+        checkpoint = await self.get_checkpoint(chain_id)
+
+        if checkpoint is None:
+            raise ValueError("Cannot roll back a missing checkpoint.")
+
+        if block_number > checkpoint.last_processed_block:
+            raise ValueError("Rollback target cannot exceed the current checkpoint.")
+
+        checkpoint.last_processed_block = block_number
+        checkpoint.block_hash = block_hash
+        checkpoint.updated_at = datetime.now(timezone.utc)
+
+        await self.session.flush()
 
         return checkpoint

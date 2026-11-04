@@ -1,16 +1,15 @@
-from app.blockchain.providers.alchemy import AlchemyNFTProvider
+
 from app.blockchain.providers.nft import NFTProvider
+from app.blockchain.providers.opensea_nft import OpenSeaNFTProvider
 from app.core.config import get_settings
 
 
 def create_nft_provider() -> NFTProvider:
     settings = get_settings()
 
-    if not settings.alchemy_api_key:
-        raise RuntimeError(
-            "Alchemy API key is not configured."
-        )
+    if not settings.opensea_api_key:
+        raise RuntimeError("OpenSea API key is not configured.")
 
-    return AlchemyNFTProvider(
-        api_key=settings.alchemy_api_key,
+    return OpenSeaNFTProvider(
+        api_key=settings.opensea_api_key,
     )

@@ -1,7 +1,8 @@
+
 import pytest
 
-from app.blockchain.providers.alchemy import AlchemyNFTProvider
 from app.blockchain.providers.nft_factory import create_nft_provider
+from app.blockchain.providers.opensea_nft import OpenSeaNFTProvider
 from app.core.config import get_settings
 
 
@@ -10,14 +11,14 @@ def test_create_nft_provider_with_api_key(monkeypatch):
 
     monkeypatch.setattr(
         settings,
-        "alchemy_api_key",
-        "test-alchemy-key",
+        "opensea_api_key",
+        "test-opensea-key",
     )
 
     provider = create_nft_provider()
 
-    assert isinstance(provider, AlchemyNFTProvider)
-    assert provider.api_key == "test-alchemy-key"
+    assert isinstance(provider, OpenSeaNFTProvider)
+    assert provider.api_key == "test-opensea-key"
 
 
 def test_create_nft_provider_without_api_key(monkeypatch):
@@ -25,12 +26,12 @@ def test_create_nft_provider_without_api_key(monkeypatch):
 
     monkeypatch.setattr(
         settings,
-        "alchemy_api_key",
+        "opensea_api_key",
         "",
     )
 
     with pytest.raises(
         RuntimeError,
-        match="Alchemy API key is not configured",
+        match="OpenSea API key is not configured",
     ):
         create_nft_provider()

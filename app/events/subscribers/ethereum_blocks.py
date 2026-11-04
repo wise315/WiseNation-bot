@@ -88,7 +88,7 @@ class EthereumBlockListener:
                 },
             )
 
-            await self.event_engine.publish(event)
+            await self.event_engine.publish(event, raise_on_error=True)
 
             self.last_processed_block = block_number
             published += 1

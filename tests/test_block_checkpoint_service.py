@@ -147,3 +147,76 @@ async def test_checkpoint_rejects_invalid_chain_id():
                 chain_id=-1,
                 block_number=100,
             )
+
+@pytest.mark.asyncio
+async def test_checkpoint_rolls_back_after_reorg():
+    async with AsyncSessionLocal() as session:
+        service = BlockCheckpointService(session)
+
+        await service.save_checkpoint(
+            chain_id=999999906,
+            block_number=200,
+            block_hash="0x" + "a" * 64,
+        )
+
+        checkpoint = await service.rollback_checkpoint(
+            chain_id=999999906,
+            block_number=195,
+            block_hash="0x" + "b" * 64,
+        )
+
+        assert checkpoint.last_processed_block == 195
+        assert checkpoint.block_hash == "0x" + "b" * 64
+
+        await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_rollback_rejects_forward_movement():
+    async with AsyncSessionLocal() as session:
+        service = BlockCheckpointService(session)
+
+        await service.save_checkpoint(
+            chain_id=999999907,
+            block_number=200,
+        )
+
+        with pytest.raises(ValueError):
+            await service.rollback_checkpoint(
+                chain_id=999999907,
+                block_number=205,
+            )
+
+        await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_rollback_rejects_missing_checkpoint():
+    async with AsyncSessionLocal() as session:
+        service = BlockCheckpointService(session)
+
+        with pytest.raises(ValueError):
+            await service.rollback_checkpoint(
+                chain_id=999999908,
+                block_number=100,
+            )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_rollback_rejects_invalid_block_hash():
+    async with AsyncSessionLocal() as session:
+        service = BlockCheckpointService(session)
+
+        await service.save_checkpoint(
+            chain_id=999999909,
+            block_number=200,
+        )
+
+        with pytest.raises(ValueError):
+            await service.rollback_checkpoint(
+                chain_id=999999909,
+                block_number=195,
+                block_hash="invalid",
+            )
+
+        await session.rollback()

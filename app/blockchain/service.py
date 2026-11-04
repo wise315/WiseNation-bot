@@ -7,5 +7,6 @@ class BlockchainService:
         settings = get_settings()
 
         self.ethereum = EthereumProvider(
-            settings.ethereum_rpc_http
+            rpc_url=settings.ethereum_rpc_http,
+            backup_rpc_url=settings.ethereum_rpc_http_backup,
         )
