@@ -1,3 +1,5 @@
+
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -8,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from app.core.config import get_settings
 from app.database.base import Base
 
-# Import all models so SQLAlchemy registers them with Base.metadata.
+# Register all existing SQLAlchemy models.
 from app.database.models import *  # noqa: F401,F403
 
 
@@ -20,10 +22,33 @@ if config.config_file_name is not None:
 
 settings = get_settings()
 
-# Alembic will use the same database URL as the application.
+# Normal operation uses the application's database URL.
+# Tests may explicitly override it with ALEMBIC_DATABASE_URL.
+database_url = (
+    os.environ.get("ALEMBIC_DATABASE_URL")
+    or settings.database_url
+)
+
+if not database_url:
+    raise RuntimeError(
+        "No database URL configured for Alembic."
+    )
+
+# Prevent accidental test database migrations from using
+# the application's database when the override is omitted.
+if os.environ.get("ALEMBIC_DATABASE_URL"):
+    from sqlalchemy.engine import make_url
+
+    parsed_url = make_url(database_url)
+
+    if parsed_url.database != "nft_bot_test":
+        raise RuntimeError(
+            "ALEMBIC_DATABASE_URL must target nft_bot_test."
+        )
+
 config.set_main_option(
     "sqlalchemy.url",
-    settings.database_url.replace("%", "%%"),
+    database_url.replace("%", "%%"),
 )
 
 target_metadata = Base.metadata
@@ -32,10 +57,8 @@ target_metadata = Base.metadata
 def run_migrations_offline() -> None:
     """Run migrations in offline mode."""
 
-    url = settings.database_url
-
     context.configure(
-        url=url,
+        url=database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={
@@ -65,15 +88,21 @@ async def run_async_migrations() -> None:
     """Create an async engine and run migrations."""
 
     connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        config.get_section(
+            config.config_ini_section,
+            {},
+        ),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(
+                do_run_migrations
+            )
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:

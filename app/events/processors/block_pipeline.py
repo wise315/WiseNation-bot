@@ -6,7 +6,15 @@ from app.events.engine import EventEngine
 from app.events.processors.nft_processor import NFTEventProcessor
 from app.events.schemas import BlockchainEvent, EventType
 from app.schemas.blockchain_activity import EthereumContractLog
+from app.services import canonical_block_service
 from app.services.block_checkpoint_service import BlockCheckpointService
+from app.services.canonical_block_service import (
+    CanonicalBlockConflictError,
+    CanonicalBlockService,
+)
+from app.services.nft_blockchain_event_service import (
+    NFTBlockchainEventService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -30,18 +38,63 @@ class BlockEventPipeline:
         event_engine: EventEngine,
         chain_id: int = 1,
         checkpoint_service: BlockCheckpointService | None = None,
+        canonical_block_service: CanonicalBlockService | None = None,
+        nft_event_service: NFTBlockchainEventService | None = None,
     ) -> None:
-        if chain_id <= 0:
+        if (
+            isinstance(chain_id, bool)
+            or not isinstance(chain_id, int)
+            or chain_id <= 0
+        ):
             raise ValueError("chain_id must be positive.")
+
+        if (
+            canonical_block_service is not None
+            and checkpoint_service is None
+        ):
+            raise ValueError(
+                "Canonical tracking requires a checkpoint service."
+            )
+
+        if (
+            canonical_block_service is not None
+            and canonical_block_service.session
+            is not checkpoint_service.session
+        ):
+            raise ValueError(
+                "Canonical and checkpoint services must share "
+                "the same database session."
+            )
+
+        if nft_event_service is not None:
+            if checkpoint_service is None:
+                raise ValueError(
+                    "NFT event persistence requires a checkpoint service."
+                )
+            if canonical_block_service is None:
+                raise ValueError(
+                    "NFT event persistence requires canonical block tracking."
+                )
+            if nft_event_service.session is not checkpoint_service.session:
+                raise ValueError(
+                    "NFT persistence and checkpoint services must share "
+                    "the same database session."
+                )
 
         self.activity_provider = activity_provider
         self.nft_processor = nft_processor
         self.event_engine = event_engine
         self.chain_id = chain_id
         self.checkpoint_service = checkpoint_service
-        
+        self.canonical_block_service = canonical_block_service
+        self.nft_event_service = nft_event_service
+
         self._inflight: dict[int, asyncio.Task[int]] = {}
         self._lock = asyncio.Lock()
+
+        # Serialize block processing and database transactions.
+        self._processing_lock = asyncio.Lock()
+
         self._subscribed = False
 
     def start(self) -> None:
@@ -99,17 +152,108 @@ class BlockEventPipeline:
 
             if task is None:
                 task = asyncio.create_task(
-                    self._process_block(block_number)
+                    self._process_block_sequentially(block_number)
                 )
                 self._inflight[block_number] = task
 
-        try:
-            return await asyncio.shield(task)
-        finally:
-            if task.done():
-                async with self._lock:
-                    if self._inflight.get(block_number) is task:
-                        del self._inflight[block_number]
+                task.add_done_callback(
+                    lambda completed, height=block_number:
+                    asyncio.create_task(
+                        self._cleanup_task(height, completed)
+                    )
+                )
+
+        return await asyncio.shield(task)
+    
+    async def _process_block_sequentially(
+        self,
+        block_number: int,
+    ) -> int:
+        async with self._processing_lock:
+            return await self._process_block(block_number)
+
+    async def _cleanup_task(
+        self,
+        block_number: int,
+        task: asyncio.Task[int],
+    ) -> None:
+        async with self._lock:
+            if self._inflight.get(block_number) is task:
+                del self._inflight[block_number]
+
+    async def _get_block_metadata(
+        self,
+        block_number: int,
+    ) -> tuple[str, str]:
+        getter = getattr(
+            self.activity_provider,
+            "get_block_metadata",
+            None,
+        )
+
+        if getter is None:
+            raise RuntimeError(
+                "Activity provider does not support "
+                "get_block_metadata()."
+            )
+
+        metadata = await getter(block_number)
+
+        if isinstance(metadata, tuple):
+            if len(metadata) != 2:
+                raise ValueError(
+                    "Block metadata must contain exactly two hashes."
+                )
+
+            block_hash, parent_hash = metadata
+
+        elif isinstance(metadata, dict):
+            block_hash = metadata["block_hash"]
+            parent_hash = metadata["parent_hash"]
+            
+        else:
+            block_hash = metadata.block_hash
+            parent_hash = metadata.parent_hash
+            
+        return block_hash, parent_hash
+
+    async def _check_canonical_history(
+        self,
+        block_number: int,
+        block_hash: str,
+        parent_hash: str,
+    ) -> None:
+        service = self.canonical_block_service
+
+        existing = await service.get_block(
+            self.chain_id,
+            block_number,
+        )
+
+        if existing is not None:
+            if (
+                existing.block_hash.lower() != block_hash.lower()
+                or existing.parent_hash.lower() != parent_hash.lower()
+            ):
+                raise CanonicalBlockConflictError(
+                    f"Reorganization detected at block {block_number}."
+                )
+
+        if block_number == 0:
+            return
+
+        previous = await service.get_block(
+            self.chain_id,
+            block_number - 1,
+        )
+
+        if (
+            previous is not None
+            and previous.block_hash.lower() != parent_hash.lower()
+        ):
+            raise CanonicalBlockConflictError(
+                f"Parent hash mismatch at block {block_number}."
+            )
 
     async def _process_block(self, block_number: int) -> int:
         logger.info(
@@ -117,24 +261,60 @@ class BlockEventPipeline:
             block_number,
         )
 
-        logs = await self.activity_provider.get_block_logs(
-            block_number=block_number,
+        session = (
+            self.checkpoint_service.session
+            if self.checkpoint_service is not None
+            else None
         )
 
-        count = await self.nft_processor.process_logs(logs)
+        try:
+            block_hash = None
+            parent_hash = None
 
-        if self.checkpoint_service is not None:
-            await self.checkpoint_service.save_checkpoint(
-                chain_id=self.chain_id,
+            if self.canonical_block_service is not None:
+                block_hash, parent_hash = (
+                    await self._get_block_metadata(block_number)
+                )
+
+                await self._check_canonical_history(
+                    block_number,
+                    block_hash,
+                    parent_hash,
+                )
+
+            logs = await self.activity_provider.get_block_logs(
                 block_number=block_number,
             )
-            await self.checkpoint_service.session.commit()
 
-        logger.info(
-            "Processed block %s: %s NFT events dispatched",
-            block_number,
-            count,
-        )
+            count = await self.nft_processor.process_logs(logs)
 
-        return count 
-    
+            if self.canonical_block_service is not None:
+                await self.canonical_block_service.save_block(
+                    chain_id=self.chain_id,
+                    block_number=block_number,
+                    block_hash=block_hash,
+                    parent_hash=parent_hash,
+                )
+
+            if self.checkpoint_service is not None:
+                await self.checkpoint_service.save_checkpoint(
+                    chain_id=self.chain_id,
+                    block_number=block_number,
+                    block_hash=block_hash,
+                )
+
+            if session is not None:
+                await session.commit()
+
+            logger.info(
+                "Processed block %s: %s NFT events dispatched",
+                block_number,
+                count,
+            )
+
+            return count
+
+        except BaseException:
+            if session is not None:
+                await session.rollback()
+            raise
