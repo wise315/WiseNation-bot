@@ -171,6 +171,25 @@ class NFTBlockchainEventService:
                 inserted += 1
 
         return inserted
+    
+    async def save_new_events(
+        self,
+        events: Sequence[BlockchainEvent],
+        block_hash: str,
+    ) -> list[BlockchainEvent]:
+        newly_inserted = []
+        
+        
+        for event in events:
+            inserted = await self.save_event(
+                event,
+                block_hash,
+            )
+
+            if inserted:
+                newly_inserted.append(event)
+
+        return newly_inserted
 
     async def get_block_events(
         self,

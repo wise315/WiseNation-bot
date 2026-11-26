@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 from typing import Protocol
@@ -6,7 +7,6 @@ from app.events.engine import EventEngine
 from app.events.processors.nft_processor import NFTEventProcessor
 from app.events.schemas import BlockchainEvent, EventType
 from app.schemas.blockchain_activity import EthereumContractLog
-from app.services import canonical_block_service
 from app.services.block_checkpoint_service import BlockCheckpointService
 from app.services.canonical_block_service import (
     CanonicalBlockConflictError,
@@ -71,10 +71,12 @@ class BlockEventPipeline:
                 raise ValueError(
                     "NFT event persistence requires a checkpoint service."
                 )
+
             if canonical_block_service is None:
                 raise ValueError(
                     "NFT event persistence requires canonical block tracking."
                 )
+
             if nft_event_service.session is not checkpoint_service.session:
                 raise ValueError(
                     "NFT persistence and checkpoint services must share "
@@ -96,8 +98,17 @@ class BlockEventPipeline:
         self._processing_lock = asyncio.Lock()
 
         self._subscribed = False
+        
+        # Prevent new processing requests during shutdown.
+        self._shutting_down = False
 
     def start(self) -> None:
+        
+        if self._shutting_down:
+            raise RuntimeError(
+                "Block pipeline is shutting down."
+            )
+        
         if self._subscribed:
             return
 
@@ -116,6 +127,59 @@ class BlockEventPipeline:
             self.handle_block_event,
         )
         self._subscribed = False
+        
+    async def shutdown(self) -> None:
+        """ Stop accepting new blocks and drain existing tasks.
+
+    Existing block-processing tasks are allowed to finish
+    before the shared database session is closed."""
+    
+        async with self._lock:
+            self._shutting_down = True
+            
+            self.stop()
+
+            tasks = list(self._inflight.values())
+            
+        logger.info(
+            "Shutting down block pipeline: waiting for %s inflight tasks...",
+            len(tasks),
+        )
+        
+        if tasks:
+            drain = asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+            
+            try:
+                results =  await asyncio.shield(drain)
+                
+            except asyncio.CancelledError:
+                # Do not abandon active database operations
+            # on the first shutdown cancellation.
+                await asyncio.shield(drain)
+                raise
+            
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "Block processing task failed during shutdown: %s",
+                        result,
+                    )
+        
+        async with self._lock:
+            completed_blocks = [
+                block_number
+                for block_number, task in self._inflight.items()
+                if task.done()
+            ]
+            
+            for block_number in completed_blocks:
+                del self._inflight[block_number]
+                
+        logger.info("Block pipeline shutdown completed.")
+        
 
     async def handle_block_event(
         self,
@@ -148,6 +212,12 @@ class BlockEventPipeline:
             raise ValueError("Invalid block number.")
 
         async with self._lock:
+            
+            if self._shutting_down:
+                raise RuntimeError(
+                    "Block pipeline is shutting down."
+                )
+            
             task = self._inflight.get(block_number)
 
             if task is None:
@@ -164,7 +234,7 @@ class BlockEventPipeline:
                 )
 
         return await asyncio.shield(task)
-    
+
     async def _process_block_sequentially(
         self,
         block_number: int,
@@ -177,6 +247,11 @@ class BlockEventPipeline:
         block_number: int,
         task: asyncio.Task[int],
     ) -> None:
+        # Retrieve exceptions even when the original caller
+        # was cancelled while awaiting a shielded task.
+        if task.done() and not task.cancelled():
+            task.exception()
+            
         async with self._lock:
             if self._inflight.get(block_number) is task:
                 del self._inflight[block_number]
@@ -210,11 +285,11 @@ class BlockEventPipeline:
         elif isinstance(metadata, dict):
             block_hash = metadata["block_hash"]
             parent_hash = metadata["parent_hash"]
-            
+
         else:
             block_hash = metadata.block_hash
             parent_hash = metadata.parent_hash
-            
+
         return block_hash, parent_hash
 
     async def _check_canonical_history(
@@ -267,6 +342,9 @@ class BlockEventPipeline:
             else None
         )
 
+        events = None
+
+        # Database operations and commit.
         try:
             block_hash = None
             parent_hash = None
@@ -286,7 +364,21 @@ class BlockEventPipeline:
                 block_number=block_number,
             )
 
-            count = await self.nft_processor.process_logs(logs)
+            if self.nft_event_service is not None:
+                # Decode without publishing.
+                decoded_events = self.nft_processor.decode_logs(logs)
+
+                # Persist using the shared database session.
+                events = await self.nft_event_service.save_new_events(
+                    decoded_events,
+                    block_hash,
+                )
+
+                count = len(events)
+
+            else:
+                # Preserve legacy behavior.
+                count = await self.nft_processor.process_logs(logs)
 
             if self.canonical_block_service is not None:
                 await self.canonical_block_service.save_block(
@@ -306,15 +398,20 @@ class BlockEventPipeline:
             if session is not None:
                 await session.commit()
 
-            logger.info(
-                "Processed block %s: %s NFT events dispatched",
-                block_number,
-                count,
-            )
-
-            return count
-
         except BaseException:
             if session is not None:
                 await session.rollback()
             raise
+
+        # Outside the transaction rollback handler.
+        # A subscriber failure cannot undo committed database changes.
+        if events:
+            await self.nft_processor.publish_events(events)
+
+        logger.info(
+            "Processed block %s: %s NFT events dispatched",
+            block_number,
+            count,
+        )
+
+        return count

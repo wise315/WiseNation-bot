@@ -296,3 +296,87 @@ async def test_events_are_isolated_by_chain():
         assert ethereum_events == []
         assert len(polygon_events) == 1
         assert polygon_events[0].is_canonical is True
+
+
+@pytest.mark.asyncio
+async def test_save_new_events_prevents_duplicates_after_commit():
+    async with integration_session() as session:
+        service = NFTBlockchainEventService(session)
+
+        event = make_event()
+
+        # First processing: insert the event.
+        first_insert = await service.save_new_events(
+            [event],
+            BLOCK_HASH,
+        )
+
+        assert len(first_insert) == 1
+        assert first_insert[0] is event
+
+        # Commit within the test's isolated transaction.
+        await session.commit()
+
+        # Replay the same blockchain event.
+        second_insert = await service.save_new_events(
+            [event],
+            BLOCK_HASH,
+        )
+
+        assert second_insert == []
+
+        await session.commit()
+
+        # Verify only one database record exists.
+        stored_events = await service.get_block_events(
+            chain_id=1,
+            block_number=100,
+        )
+
+        assert len(stored_events) == 1
+        assert stored_events[0].block_hash == BLOCK_HASH
+        assert stored_events[0].transaction_hash == TX_HASH
+        assert stored_events[0].log_index == 0
+        assert stored_events[0].batch_index == 0
+
+
+@pytest.mark.asyncio
+async def test_save_new_events_returns_only_new_batch_items():
+    async with integration_session() as session:
+        service = NFTBlockchainEventService(session)
+
+        first_event = make_event(batch_index=0)
+        second_event = make_event(batch_index=1)
+        third_event = make_event(batch_index=2)
+
+        # Initially persist the first two events.
+        initial = await service.save_new_events(
+            [first_event, second_event],
+            BLOCK_HASH,
+        )
+
+        assert initial == [first_event, second_event]
+
+        await session.commit()
+
+        # Replay old events alongside one new event.
+        newly_inserted = await service.save_new_events(
+            [first_event, second_event, third_event],
+            BLOCK_HASH,
+        )
+
+        assert newly_inserted == [third_event]
+
+        await session.commit()
+
+        # Verify all three distinct records are present.
+        stored_events = await service.get_transaction_events(
+            chain_id=1,
+            transaction_hash=TX_HASH,
+        )
+
+        assert len(stored_events) == 3
+
+        assert [
+            event.batch_index for event in stored_events
+        ] == [0, 1, 2]
